@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -25,6 +26,7 @@ type Message struct {
 	Data string `json:"data"`
 	From string `json:"from"`
 	To   string `json:"to"`
+	Name string `json:"name"`
 }
 
 var (
@@ -40,6 +42,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientID := r.URL.Query().Get("id")
+	clientName := r.URL.Query().Get("name")
+	fmt.Printf("Client ID: %s, Name: %s\n", clientID, clientName)
 	if clientID == "" {
 		clientID = fmt.Sprintf("user-%d", len(clients))
 	}
@@ -55,7 +59,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	mutex.Unlock()
 
 	// Broadcast new user immediately after connection
-	broadcastNewUser(clientID)
+	broadcastNewUser(clientID, clientName)
 	log.Printf("Total connected clients: %d", len(clients))
 
 	defer func() {
@@ -103,15 +107,31 @@ func broadcastMessage(msg Message) {
 	}
 }
 
-func broadcastNewUser(newClientID string) {
+func broadcastNewUser(newClientID string, newClientName string) {
 	broadcastMessage(Message{
 		Type: "new_user",
 		Data: newClientID,
+		Name: newClientName,
 	})
+}
+
+func sendAllUsers(w http.ResponseWriter, r *http.Request) {
+	mutex.RLock()
+	defer mutex.RUnlock()
+
+	var users []string
+	for id := range clients {
+		users = append(users, id)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	// send user id and user name in response
+	json.NewEncoder(w).Encode(map[string]interface{}{"users": clients})
 }
 
 func main() {
 	http.HandleFunc("/ws", handleWebSocket)
+	http.HandleFunc("/users", sendAllUsers)
 	http.Handle("/", http.FileServer(http.Dir("static")))
 
 	fmt.Println("Server starting at https://localhost:8080")

@@ -7,6 +7,7 @@
 
 <body>
     <!-- HTML Structure -->
+    <input text="your name" id="name">
     <div id="videos">
         <video id="localVideo" autoplay playsinline></video>
         <video id="remoteVideo" autoplay playsinline></video>
@@ -16,98 +17,77 @@
         <button id="muteVideo">Mute Video</button>
         <button id="startCall">Start Call</button>
     </div>
+    User List:
+    <div id="userList">
+    </div>
+</body>
 
-    <!-- JavaScript -->
-    <script>
-        const connectedClients = new Set();
-        let localStream;
-        let peerConnection;
-        const clientId = 'user-' + Math.random().toString(36).substr(2, 9);
-        const ws = new WebSocket(`wss://${window.location.host}/ws?id=${clientId}`);
+</html>
 
-        async function createPeerConnection() {
-            const configuration = {
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-            };
+<script>
+    // au lancement de la page
+    document.addEventListener('DOMContentLoaded', () => {
+        console.log('loaded');
+        loadAllUsers();
+    });
 
-            peerConnection = new RTCPeerConnection(configuration);
-
-            // Add local tracks to connection
-            localStream.getTracks().forEach(track => {
-                peerConnection.addTrack(track, localStream);
-            });
-
-            // Handle incoming remote stream
-            peerConnection.ontrack = event => {
-                console.log('Received remote track');
-                document.getElementById('remoteVideo').srcObject = event.streams[0];
-            };
-
-            // Send ICE candidates to peer
-            peerConnection.onicecandidate = event => {
-                if (event.candidate) {
-                    console.log('Sending ICE candidate');
-                    ws.send(JSON.stringify({
-                        type: 'candidate',
-                        data: JSON.stringify(event.candidate),
-                        to: Array.from(connectedClients)[0] // Send to first connected peer
-                    }));
-                }
-            };
-
-            return peerConnection;
-        }
-
-        async function initWebRTC() {
-            try {
-                if (!navigator.mediaDevices) {
-                    throw new Error('mediaDevices API not supported');
-                }
-
-                // Check if running on HTTPS or localhost
-                if (!window.location.protocol.startsWith('https') &&
-                    window.location.hostname !== 'localhost') {
-                    throw new Error('WebRTC requires HTTPS (or localhost)');
-                }
-
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: true,
-                    video: true
+    function loadAllUsers() {
+        let url = 'https://localhost:8080/users';
+        url = url.replace('localhost', window.location.hostname);
+        fetch(url)
+            .then(response => response.json())
+            .then(data => {
+                console.log(data);
+                const userList = document.getElementById('userList');
+                userList.innerHTML = ''; // Nettoie la liste
+                data.forEach(user => {
+                    console.log(user);
+                    const userElement = document.createElement('button');
+                    userElement.textContent = user.name;
+                    userElement.className = 'user-btn';
+                    userElement.onclick = () => startCall(user.id);
+                    userList.appendChild(userElement);
                 });
-                document.getElementById('localVideo').srcObject = localStream;
-                await createPeerConnection();
-            } catch (e) {
-                console.error('Error initializing WebRTC:', e);
-                alert('Unable to access camera/microphone. Please ensure you are using HTTPS and have granted permissions.');
-            }
+            })
+            .catch(error => console.error('Error:', error));
+    }
+
+    const connectedClients = new Map(); // Map pour stocker les noms et IDs
+    let localStream;
+    let peerConnection;
+    let ws;
+    const clientId = 'user-' + Math.random().toString(36).substr(2, 9);
+    let clientName;
+    let inCall = false; // Indicateur d’appel actif
+
+    function initializeApp() {
+        const nameInput = document.getElementById('name');
+        const name = nameInput.value.trim();
+        if (!name) {
+            alert('Please enter your name');
+            return false;
         }
 
-        document.getElementById('startCall').onclick = async () => {
-            try {
-                console.log('Starting call...');
-                const availablePeers = Array.from(connectedClients);
-                if (availablePeers.length === 0) {
-                    console.log('No other users connected');
-                    return;
-                }
+        clientName = name;
+        document.cookie = `name=${clientName}`;
+        ws = new WebSocket(`wss://${window.location.host}/ws?id=${clientId}&name=${clientName}`);
+        setupWebSocket();
+        return true;
+    }
 
-                const targetPeer = availablePeers[0];
-                console.log('Creating offer for peer:', targetPeer);
-
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-
-                ws.send(JSON.stringify({
-                    type: 'offer',
-                    data: JSON.stringify(offer),
-                    to: targetPeer
-                }));
-            } catch (e) {
-                console.error('Error starting call:', e);
+    document.getElementById('name').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') {
+            if (initializeApp()) {
+                this.disabled = true;
+                initWebRTC().catch(console.error);
             }
-        };
+        }
+    });
 
-        ws.onmessage = async function (event) {
+    function setupWebSocket() {
+        ws.onopen = () => console.log('WebSocket connection established');
+
+        ws.onmessage = async (event) => {
             const message = JSON.parse(event.data);
             console.log('Received message:', message);
 
@@ -115,21 +95,24 @@
                 switch (message.type) {
                     case 'new_user':
                         if (message.data !== clientId) {
-                            connectedClients.add(message.data);
-                            console.log('New user joined:', message.data);
+                            connectedClients.set(message.data, message.name);
+                            updateUserList();
                         }
                         break;
 
                     case 'offer':
-                        console.log('Received offer');
-                        await peerConnection.setRemoteDescription(JSON.parse(message.data));
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
-                        ws.send(JSON.stringify({
-                            type: 'answer',
-                            data: JSON.stringify(answer),
-                            to: message.from
-                        }));
+                        if (!inCall) {
+                            console.log(`Incoming call from ${message.from}`);
+                            await peerConnection.setRemoteDescription(JSON.parse(message.data));
+                            const answer = await peerConnection.createAnswer();
+                            await peerConnection.setLocalDescription(answer);
+                            ws.send(JSON.stringify({
+                                type: 'answer',
+                                data: JSON.stringify(answer),
+                                to: message.from
+                            }));
+                            inCall = true;
+                        }
                         break;
 
                     case 'answer':
@@ -140,9 +123,13 @@
                     case 'candidate':
                         console.log('Received ICE candidate');
                         if (message.data) {
-                            const candidate = JSON.parse(message.data);
-                            await peerConnection.addIceCandidate(candidate);
+                            await peerConnection.addIceCandidate(JSON.parse(message.data));
                         }
+                        break;
+
+                    case 'end_call':
+                        console.log('Call ended');
+                        endCall();
                         break;
                 }
             } catch (e) {
@@ -150,46 +137,152 @@
             }
         };
 
-        // Initialize when page loads
+        ws.onerror = (error) => console.error('WebSocket error:', error);
+    }
+
+    async function initWebRTC() {
+        try {
+            if (!navigator.mediaDevices) {
+                throw new Error('mediaDevices API not supported');
+            }
+            if (!window.location.protocol.startsWith('https') && window.location.hostname !== 'localhost') {
+                throw new Error('WebRTC requires HTTPS (or localhost)');
+            }
+
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+            document.getElementById('localVideo').srcObject = localStream;
+            await createPeerConnection();
+        } catch (e) {
+            console.error('Error initializing WebRTC:', e);
+            alert('Unable to access camera/microphone. Please ensure you are using HTTPS and have granted permissions.');
+        }
+    }
+
+    async function createPeerConnection() {
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        peerConnection = new RTCPeerConnection(configuration);
+
+        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+        peerConnection.ontrack = event => {
+            console.log('Received remote track');
+            document.getElementById('remoteVideo').srcObject = event.streams[0];
+        };
+
+        peerConnection.onicecandidate = event => {
+            if (event.candidate && inCall) {
+                console.log('Sending ICE candidate');
+                ws.send(JSON.stringify({
+                    type: 'candidate',
+                    data: JSON.stringify(event.candidate),
+                    to: Array.from(connectedClients.keys())[0]
+                }));
+            }
+        };
+    }
+
+    function updateUserList() {
+        const userList = document.getElementById('userList');
+        userList.innerHTML = ''; // Nettoie la liste
+        connectedClients.forEach((name, id) => {
+            if (name !== clientName) {
+                const userElement = document.createElement('button');
+                userElement.textContent = name;
+                userElement.className = 'user-btn';
+                userElement.onclick = () => startCall(id);
+                userList.appendChild(userElement);
+            }
+        });
+    }
+
+    async function startCall(targetPeer) {
+        if (inCall) {
+            console.log('Already in a call. Please end it first.');
+            return;
+        }
+
+        console.log(`Starting call with ${targetPeer}`);
+        inCall = true;
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        ws.send(JSON.stringify({
+            type: 'offer',
+            data: JSON.stringify(offer),
+            to: targetPeer
+        }));
+    }
+
+    function endCall() {
+        if (!inCall) return;
+
+        console.log('Ending call...');
+        inCall = false;
+
+        if (peerConnection) {
+            peerConnection.close();
+            peerConnection = null;
+        }
+
+        ws.send(JSON.stringify({ type: 'end_call' }));
+
         initWebRTC().catch(console.error);
-    </script>
+    }
 
-    <!-- CSS Styles -->
-    <style>
-        #videos {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            padding: 20px;
-        }
+    // Bouton pour quitter l’appel
+    document.getElementById('endCall').onclick = endCall;
 
-        video {
-            width: 100%;
-            max-width: 600px;
-            border-radius: 8px;
-            background: #2c2c2c;
-        }
+    document.getElementById('muteAudio').onclick = () => {
+        console.log('muteAudio');
+        const track = localStream.getAudioTracks()[0];
+        track.enabled = !track.enabled;
+        document.getElementById('muteAudio').classList.toggle('muted', !track.enabled);
+    };
 
-        .controls {
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin: 20px;
-        }
+    document.getElementById('muteVideo').onclick = () => {
+        console.log('muteVideo');
+        const track = localStream.getVideoTracks()[0];
+        track.enabled = !track.enabled;
+        document.getElementById('muteVideo').classList.toggle('muted', !track.enabled);
+    };
 
-        button {
-            padding: 10px 20px;
-            border-radius: 5px;
-            border: none;
-            background: #007bff;
-            color: white;
-            cursor: pointer;
-        }
+    // Initialise l’application
+    initWebRTC().catch(console.error);
+</script>
 
-        button.muted {
-            background: #dc3545;
-        }
-    </style>
-</body>
+<style>
+    #videos {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        padding: 20px;
+    }
 
-</html>
+    video {
+        width: 100%;
+        max-width: 600px;
+        border-radius: 8px;
+        background: #2c2c2c;
+    }
+
+    .controls {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin: 20px;
+    }
+
+    button {
+        padding: 10px 20px;
+        border-radius: 5px;
+        border: none;
+        background: #007bff;
+        color: white;
+        cursor: pointer;
+    }
+
+    button.muted {
+        background: #dc3545;
+    }
+</style>
